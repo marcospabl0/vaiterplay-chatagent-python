@@ -8,3 +8,4 @@ pydantic-settings==2.0.3
 python-dateutil==2.8.2
 pydantic==2.5.0
 groq==0.22.0
+# Removido phonenumbers para evitar problemas de compilação Rust
