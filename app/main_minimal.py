@@ -1,6 +1,6 @@
 """
 Aplicação principal FastAPI para o Agente de Reservas de Quadras
-Versão compatível com Pydantic v1
+Versão compatível com Pydantic v2
 """
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
@@ -119,7 +119,7 @@ async def test_message(request: Request):
 if __name__ == "__main__":
     # Execução direta da aplicação (para desenvolvimento)
     uvicorn.run(
-        "app.main:app",
+        "app.main_minimal:app",
         host="0.0.0.0",
         port=8000,
         reload=settings.DEBUG,
