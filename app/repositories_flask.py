@@ -4,8 +4,8 @@ Repositórios para operações CRUD com MongoDB
 import logging
 from datetime import datetime
 from typing import List, Optional
-from app.db_flask import mongodb
-from app.models_flask import User, Court, Reservation
+from .db_flask import mongodb
+from .models_flask import User, Court, Reservation
 
 logger = logging.getLogger(__name__)
 

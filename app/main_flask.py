@@ -6,9 +6,9 @@ from flask import Flask, request, jsonify
 import logging
 import os
 from datetime import datetime
-from app.db_flask import mongodb
-from app.repositories_flask import user_repo, court_repo, reservation_repo
-from app.models_flask import User, Court, Reservation
+from .db_flask import mongodb
+from .repositories_flask import user_repo, court_repo, reservation_repo
+from .models_flask import User, Court, Reservation
 
 # Configuração de logging
 logging.basicConfig(

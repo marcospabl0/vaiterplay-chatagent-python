@@ -4,7 +4,7 @@ services:
     env: python
     plan: free
     buildCommand: pip install --upgrade pip && pip install -r requirements-flask.txt
-    startCommand: python app/main_flask.py
+    startCommand: python main_flask_single.py
     envVars:
       - key: MONGODB_URI
         sync: false
