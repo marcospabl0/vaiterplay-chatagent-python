@@ -51,7 +51,7 @@ def root():
         "message": "Genia Quadras - Agente WhatsApp",
         "status": "online",
         "version": "1.0.0",
-        "database": "connected" if mongodb.db else "disconnected"
+        "database": "connected" if mongodb.db is not None else "disconnected"
     })
 
 
@@ -61,7 +61,7 @@ def health_check():
     return jsonify({
         "status": "healthy", 
         "service": "genia-quadras",
-        "database": "connected" if mongodb.db else "disconnected"
+        "database": "connected" if mongodb.db is not None else "disconnected"
     })
 
 

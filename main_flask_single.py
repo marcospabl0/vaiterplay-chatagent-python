@@ -146,7 +146,7 @@ class MongoDBConnection:
     
     def get_collection(self, collection_name: str):
         """Retorna uma coleção MongoDB"""
-        if not self.db:
+        if self.db is None:
             raise RuntimeError("Database não foi inicializada. Chame connect_sync() primeiro.")
         return self.db[collection_name]
 
@@ -245,7 +245,7 @@ def root():
         "message": "Genia Quadras - Agente WhatsApp",
         "status": "online",
         "version": "1.0.0",
-        "database": "connected" if mongodb.db else "disconnected"
+        "database": "connected" if mongodb.db is not None else "disconnected"
     })
 
 @app.route("/health")
@@ -254,7 +254,7 @@ def health_check():
     return jsonify({
         "status": "healthy", 
         "service": "genia-quadras",
-        "database": "connected" if mongodb.db else "disconnected"
+        "database": "connected" if mongodb.db is not None else "disconnected"
     })
 
 @app.route("/webhook", methods=["POST"])
