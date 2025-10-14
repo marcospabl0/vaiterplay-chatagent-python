@@ -531,11 +531,22 @@ def whatsapp_webhook():
     Webhook para receber mensagens do Twilio WhatsApp
     """
     try:
-        # Extrai dados do formulário enviado pelo Twilio
-        from_number = request.form.get("From", "")
-        message_body = request.form.get("Body", "")
+        # Extrai dados do formulário enviado pelo Twilio (x-www-form-urlencoded)
+        form = request.form or {}
+        from_number = form.get("From", "")
+        message_body = form.get("Body", "")
+        wa_id = form.get("WaId")  # apenas números, ex: 5511999999999
+        profile_name = form.get("ProfileName")
+        channel_metadata = form.get("ChannelMetadata")
+        # Fallback: se não veio From, monta a partir do WaId
+        if (not from_number) and wa_id:
+            from_number = f"whatsapp:+{wa_id}"
+        # Sanitiza mínimos
+        from_number = (from_number or "").strip()
+        message_body = (message_body or "").strip()
         
         logger.info(f"Mensagem recebida de {from_number}: {message_body}")
+        logger.debug(f"Payload Twilio: form={dict(form)}")
         
         # Valida se tem dados necessários
         if not from_number or not message_body:
@@ -565,22 +576,13 @@ def test_message():
         
         logger.info(f"Teste - Mensagem de {phone}: {message}")
         
-        # Busca ou cria usuário
-        try:
-            user = user_repo.find_or_create_by_phone(phone)
-            logger.info(f"Usuário encontrado/criado: {user.nome}")
-        except Exception as e:
-            logger.error(f"Erro ao buscar/criar usuário: {e}")
-            user = User(nome="Usuário", telefone=phone)
-        
-        # Resposta simples para teste
-        reply_text = f"Olá {user.nome}! Recebi sua mensagem: '{message}'. Sistema com MongoDB funcionando!"
+        # Usa a mesma lógica do webhook (NLU + fluxo de reserva)
+        reply_text = process_message(phone, message)
         
         return jsonify({
             "phone": phone,
             "message": message,
-            "reply": reply_text,
-            "user": user.to_dict()
+            "reply": reply_text
         })
         
     except Exception as e:
