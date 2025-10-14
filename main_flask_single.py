@@ -11,6 +11,7 @@ from bson import ObjectId
 from typing import Optional, List, Tuple
 import re
 from twilio.twiml.messaging_response import MessagingResponse
+from groq import Groq
 
 # Configuração de logging
 logging.basicConfig(
@@ -34,6 +35,16 @@ class SimpleSettings:
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
 settings = SimpleSettings()
+
+# Cliente Groq (opcional)
+groq_client = None
+if settings.USE_LLM and settings.GROQ_API_KEY:
+    try:
+        groq_client = Groq(api_key=settings.GROQ_API_KEY)
+        logger.info("Groq LLM habilitado.")
+    except Exception as e:
+        logger.error(f"Falha ao inicializar Groq: {e}")
+        groq_client = None
 
 # Criação da aplicação Flask
 app = Flask(__name__)
@@ -61,13 +72,15 @@ class User:
         return telefone_limpo
     
     def to_dict(self):
-        """Converte para dicionário"""
-        return {
-            "_id": self._id,
+        """Converte para dicionário (omitindo _id quando None)"""
+        data = {
             "nome": self.nome,
             "telefone": self.telefone,
             "criado_em": self.criado_em
         }
+        if self._id:
+            data["_id"] = self._id
+        return data
     
     @classmethod
     def from_dict(cls, data: dict):
@@ -92,15 +105,17 @@ class Court:
         self.horarios_disponiveis = horarios_disponiveis or []
     
     def to_dict(self):
-        """Converte para dicionário"""
-        return {
-            "_id": self._id,
+        """Converte para dicionário (omitindo _id quando None)"""
+        data = {
             "nome": self.nome,
             "tipo": self.tipo,
             "endereco": self.endereco,
             "valor_hora": self.valor_hora,
             "horarios_disponiveis": [h.isoformat() if isinstance(h, datetime) else h for h in self.horarios_disponiveis]
         }
+        if self._id:
+            data["_id"] = self._id
+        return data
     
     @classmethod
     def from_dict(cls, data: dict):
@@ -253,8 +268,7 @@ class Reservation:
         self.criado_em = criado_em or datetime.now()
 
     def to_dict(self):
-        return {
-            "_id": self._id,
+        data = {
             "usuario": self.usuario.to_dict(),
             "quadra_id": self.quadra_id,
             "data_reserva": self.data_reserva.isoformat(),
@@ -262,6 +276,9 @@ class Reservation:
             "status": self.status,
             "criado_em": self.criado_em.isoformat()
         }
+        if self._id:
+            data["_id"] = self._id
+        return data
 
     @classmethod
     def from_dict(cls, data: dict):
@@ -326,8 +343,126 @@ class ConversationStateRepository:
     def clear_state(self, phone: str):
         self.get_collection().delete_one({"phone": phone})
 
+class ConversationMessage:
+    """Modelo para mensagem individual da conversa"""
+    def __init__(self, role: str, content: str, timestamp: Optional[datetime] = None):
+        self.role = role  # "user" ou "assistant"
+        self.content = content
+        self.timestamp = timestamp or datetime.now()
+
+    def to_dict(self):
+        return {
+            "role": self.role,
+            "content": self.content,
+            "timestamp": self.timestamp.isoformat()
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict):
+        return cls(
+            role=data.get("role", "user"),
+            content=data.get("content", ""),
+            timestamp=datetime.fromisoformat(data.get("timestamp")) if data.get("timestamp") else datetime.now()
+        )
+
+class ConversationHistoryRepository:
+    """Repositório para histórico de conversas (janela de 24h)"""
+    def __init__(self):
+        self.collection_name = "conversation_history"
+
+    def get_collection(self):
+        return mongodb.get_collection(self.collection_name)
+
+    def add_message(self, phone: str, message: ConversationMessage):
+        """Adiciona mensagem ao histórico do usuário"""
+        try:
+            # Busca ou cria documento do usuário
+            user_doc = self.get_collection().find_one({"phone": phone})
+            if not user_doc:
+                user_doc = {
+                    "phone": phone,
+                    "messages": [],
+                    "last_activity": datetime.now().isoformat()
+                }
+                self.get_collection().insert_one(user_doc)
+                user_doc = self.get_collection().find_one({"phone": phone})
+            
+            # Adiciona nova mensagem
+            messages = user_doc.get("messages", [])
+            messages.append(message.to_dict())
+            
+            # Atualiza documento
+            self.get_collection().update_one(
+                {"phone": phone},
+                {
+                    "$set": {
+                        "messages": messages,
+                        "last_activity": datetime.now().isoformat()
+                    }
+                }
+            )
+        except Exception as e:
+            logger.error(f"Erro ao adicionar mensagem ao histórico: {e}")
+
+    def get_recent_messages(self, phone: str, hours: int = 24) -> List[ConversationMessage]:
+        """Recupera mensagens das últimas N horas"""
+        try:
+            cutoff_time = datetime.now() - timedelta(hours=hours)
+            user_doc = self.get_collection().find_one({"phone": phone})
+            if not user_doc:
+                return []
+            
+            messages = []
+            for msg_data in user_doc.get("messages", []):
+                msg = ConversationMessage.from_dict(msg_data)
+                if msg.timestamp >= cutoff_time:
+                    messages.append(msg)
+            
+            return messages
+        except Exception as e:
+            logger.error(f"Erro ao recuperar histórico: {e}")
+            return []
+
+    def clear_old_messages(self, phone: str, hours: int = 24):
+        """Remove mensagens mais antigas que N horas"""
+        try:
+            cutoff_time = datetime.now() - timedelta(hours=hours)
+            user_doc = self.get_collection().find_one({"phone": phone})
+            if not user_doc:
+                return
+            
+            messages = []
+            for msg_data in user_doc.get("messages", []):
+                msg = ConversationMessage.from_dict(msg_data)
+                if msg.timestamp >= cutoff_time:
+                    messages.append(msg_data)
+            
+            self.get_collection().update_one(
+                {"phone": phone},
+                {"$set": {"messages": messages}}
+            )
+        except Exception as e:
+            logger.error(f"Erro ao limpar histórico antigo: {e}")
+
+    def get_conversation_context(self, phone: str, max_messages: int = 10) -> str:
+        """Retorna contexto da conversa como string para LLM"""
+        messages = self.get_recent_messages(phone, hours=24)
+        if not messages:
+            return ""
+        
+        # Pega as últimas N mensagens
+        recent = messages[-max_messages:] if len(messages) > max_messages else messages
+        
+        context_lines = []
+        for msg in recent:
+            role_label = "Usuário" if msg.role == "user" else "Assistente"
+            context_lines.append(f"{role_label}: {msg.content}")
+        
+        return "\n".join(context_lines)
+
 reservation_repo = ReservationRepository()
 state_repo = ConversationStateRepository()
+history_repo = ConversationHistoryRepository()
 
 # ===== NLU E HELPERS =====
 HOURS_PATTERN = re.compile(r"(\d{1,2})(?:h|:\d{2})?", re.IGNORECASE)
@@ -397,6 +532,9 @@ def block_slots(court: Court, base: datetime, hours: int):
 
 def intent_from_text(text: str, pending_state: Optional[dict]) -> str:
     t = text.lower()
+    # Saudações diretas
+    if t.strip() in ["oi", "olá", "ola", "bom dia", "boa tarde", "boa noite"]:
+        return "saudacao"
     if pending_state and pending_state.get("awaiting") == "confirmation":
         if any(w in t for w in ["confirmo", "confirmar", "sim", "ok"]):
             return "confirmar"
@@ -486,24 +624,103 @@ def handle_cancel(phone: str) -> str:
     return "Ok, cancelado. Se quiser, posso buscar outro horário."
 
 def process_message(phone: str, text: str) -> str:
+    # Salva mensagem do usuário no histórico
+    user_message = ConversationMessage(role="user", content=text)
+    history_repo.add_message(phone, user_message)
+    
     user = user_repo.find_or_create_by_phone(phone)
     pending = state_repo.get_state(phone)
     intent = intent_from_text(text, pending)
-    if intent == "ajuda":
-        return handle_help()
-    if intent == "consultar":
-        return handle_consulta(phone)
-    if intent == "reservar":
-        return handle_reserva_flow(user, text, phone)
-    if intent == "confirmar":
-        return handle_confirm(phone, user)
-    if intent == "cancelar":
+    
+    # Processa com NLU tradicional primeiro
+    if intent == "saudacao":
+        response = (
+            "Olá! Eu sou seu assistente de reservas. Posso reservar quadra, consultar e cancelar. "
+            "Diga algo como: 'reservar amanhã 19h por 2 horas society'."
+        )
+    elif intent == "ajuda":
+        response = handle_help()
+    elif intent == "consultar":
+        response = handle_consulta(phone)
+    elif intent == "reservar":
+        response = handle_reserva_flow(user, text, phone)
+    elif intent == "confirmar":
+        response = handle_confirm(phone, user)
+    elif intent == "cancelar":
         # prioridade: cancelar fluxo pendente
         if pending and pending.get("awaiting") == "confirmation":
-            return handle_cancel(phone)
-        return "Para cancelar, informe o código ou responda durante uma confirmação."
-    # fallback
-    return "Não entendi. Envie 'ajuda' para ver exemplos."
+            response = handle_cancel(phone)
+        else:
+            response = "Para cancelar, informe o código ou responda durante uma confirmação."
+    else:
+        # Fallback: usar LLM com contexto da conversa
+        response = generate_llm_response(phone, text)
+    
+    # Salva resposta do assistente no histórico
+    assistant_message = ConversationMessage(role="assistant", content=response)
+    history_repo.add_message(phone, assistant_message)
+    
+    # Limpa mensagens antigas (mais de 24h)
+    history_repo.clear_old_messages(phone, hours=24)
+    
+    return response
+
+def generate_llm_response(phone: str, text: str) -> str:
+    """Gera resposta usando LLM com contexto da conversa"""
+    if not groq_client:
+        return "Não entendi. Envie 'ajuda' para ver exemplos."
+    
+    try:
+        # Contexto das quadras
+        courts = court_repo.get_all()
+        courts_context = "\n".join([f"- {c.nome} ({c.tipo}) - R${c.valor_hora:.2f}/h" for c in courts][:10]) or "(sem quadras cadastradas)"
+        
+        # Contexto da conversa (últimas 10 mensagens)
+        conversation_context = history_repo.get_conversation_context(phone, max_messages=10)
+        
+        # Estado atual (se houver)
+        pending = state_repo.get_state(phone)
+        state_context = ""
+        if pending and pending.get("awaiting") == "confirmation":
+            state_context = f"\nEstado atual: Aguardando confirmação de reserva - {pending.get('court_nome')} em {pending.get('start_iso')} por {pending.get('hours_qty')}h - Total: R${pending.get('total', 0):.2f}"
+        
+        # Monta prompt com contexto completo
+        prompt = f"""Você é um assistente de reservas de quadras esportivas via WhatsApp. 
+Aja de forma natural, amigável e objetiva em português do Brasil.
+
+CONTEXTO DAS QUADRAS:
+{courts_context}
+
+HISTÓRICO DA CONVERSA (últimas mensagens):
+{conversation_context if conversation_context else "Primeira mensagem da conversa"}
+
+{state_context}
+
+MENSAGEM ATUAL DO USUÁRIO: {text}
+
+INSTRUÇÕES:
+- Use o histórico para entender o contexto da conversa
+- Se o usuário estiver perguntando sobre disponibilidade, liste as quadras e horários
+- Se quiser reservar, peça data, hora e quantidade de horas
+- Seja natural e mantenha o contexto da conversa
+- Se não entender, peça esclarecimento de forma amigável
+- Respostas devem ser curtas e diretas (máximo 200 caracteres)"""
+
+        chat = groq_client.chat.completions.create(
+            model=settings.GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": "Você é um assistente especializado em reservas de quadras esportivas."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.7,
+            max_tokens=200,
+        )
+        
+        return chat.choices[0].message.content.strip()
+        
+    except Exception as e:
+        logger.error(f"LLM fallback falhou: {e}")
+        return "Não entendi. Envie 'ajuda' para ver exemplos."
 
 # ===== ROTAS =====
 @app.route("/")
