@@ -3,8 +3,8 @@ services:
     name: genia-quadras
     env: python
     plan: free
-    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    buildCommand: pip install --upgrade pip && pip install -r requirements-stable.txt
+    startCommand: uvicorn app.main_minimal:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: MONGODB_DB
         value: vaiterplay
