@@ -1,11 +1,9 @@
 """
-Aplicação principal FastAPI para o Agente de Reservas de Quadras
-Versão compatível com Pydantic v1
+Aplicação Flask simples para o Agente de Reservas de Quadras
+Versão sem dependências de compilação Rust
 """
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import PlainTextResponse
+from flask import Flask, request, jsonify
 import logging
-import uvicorn
 import os
 
 # Configuração de logging
@@ -31,72 +29,65 @@ class SimpleSettings:
 
 settings = SimpleSettings()
 
-# Criação da aplicação FastAPI
-app = FastAPI(
-    title="Genia Quadras - Agente WhatsApp",
-    description="Sistema de reservas de quadras via WhatsApp usando Twilio",
-    version="1.0.0"
-)
+# Criação da aplicação Flask
+app = Flask(__name__)
 
 
-@app.get("/")
-async def root():
+@app.route("/")
+def root():
     """Endpoint raiz para verificar se a API está funcionando"""
-    return {
+    return jsonify({
         "message": "Genia Quadras - Agente WhatsApp",
         "status": "online",
         "version": "1.0.0"
-    }
+    })
 
 
-@app.get("/health")
-async def health_check():
+@app.route("/health")
+def health_check():
     """Endpoint de health check"""
-    return {
+    return jsonify({
         "status": "healthy", 
         "service": "genia-quadras"
-    }
+    })
 
 
-@app.post("/webhook")
-async def whatsapp_webhook(request: Request):
+@app.route("/webhook", methods=["POST"])
+def whatsapp_webhook():
     """
     Webhook para receber mensagens do Twilio WhatsApp
     """
     try:
         # Extrai dados do formulário enviado pelo Twilio
-        form_data = await request.form()
-        
-        # Extrai informações da mensagem
-        from_number = form_data.get("From", "")
-        message_body = form_data.get("Body", "")
+        from_number = request.form.get("From", "")
+        message_body = request.form.get("Body", "")
         
         logger.info(f"Mensagem recebida de {from_number}: {message_body}")
         
         # Valida se tem dados necessários
         if not from_number or not message_body:
             logger.warning("Mensagem sem dados necessários")
-            return PlainTextResponse("OK")
+            return "OK"
         
         # Resposta simples para teste
         reply_text = f"Olá! Recebi sua mensagem: '{message_body}'. Sistema em desenvolvimento."
         
         logger.info(f"Resposta enviada para {from_number}")
         
-        return PlainTextResponse("OK")
+        return "OK"
         
     except Exception as e:
         logger.error(f"Erro no webhook: {e}")
-        return PlainTextResponse("ERROR", status_code=500)
+        return "ERROR", 500
 
 
-@app.post("/test-message")
-async def test_message(request: Request):
+@app.route("/test-message", methods=["POST"])
+def test_message():
     """
     Endpoint para testar o agente sem Twilio
     """
     try:
-        data = await request.json()
+        data = request.get_json()
         phone = data.get("phone", "whatsapp:+5511999999999")
         message = data.get("message", "Oi")
         
@@ -105,23 +96,22 @@ async def test_message(request: Request):
         # Resposta simples para teste
         reply_text = f"Olá! Recebi sua mensagem: '{message}'. Sistema funcionando!"
         
-        return {
+        return jsonify({
             "phone": phone,
             "message": message,
             "reply": reply_text
-        }
+        })
         
     except Exception as e:
         logger.error(f"Erro no teste: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
     # Execução direta da aplicação (para desenvolvimento)
-    uvicorn.run(
-        "app.main_minimal:app",
+    port = int(os.getenv("PORT", 8000))
+    app.run(
         host="0.0.0.0",
-        port=8000,
-        reload=settings.DEBUG,
-        log_level=settings.LOG_LEVEL.lower()
+        port=port,
+        debug=settings.DEBUG
     )
