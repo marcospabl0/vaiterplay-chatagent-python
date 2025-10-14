@@ -8,8 +8,9 @@ import os
 from datetime import datetime, timedelta
 from pymongo import MongoClient
 from bson import ObjectId
-from typing import Optional, List
+from typing import Optional, List, Tuple
 import re
+from twilio.twiml.messaging_response import MessagingResponse
 
 # Configuração de logging
 logging.basicConfig(
@@ -237,6 +238,273 @@ class CourtRepository:
 user_repo = UserRepository()
 court_repo = CourtRepository()
 
+class Reservation:
+    """Modelo para Reserva"""
+
+    def __init__(self, usuario: User, quadra_id: str, data_reserva: datetime,
+                 quantidade_horas: int = 1, status: str = "pendente",
+                 criado_em: Optional[datetime] = None, _id: Optional[str] = None):
+        self._id = _id
+        self.usuario = usuario
+        self.quadra_id = quadra_id
+        self.data_reserva = data_reserva
+        self.quantidade_horas = quantidade_horas
+        self.status = status
+        self.criado_em = criado_em or datetime.now()
+
+    def to_dict(self):
+        return {
+            "_id": self._id,
+            "usuario": self.usuario.to_dict(),
+            "quadra_id": self.quadra_id,
+            "data_reserva": self.data_reserva.isoformat(),
+            "quantidade_horas": self.quantidade_horas,
+            "status": self.status,
+            "criado_em": self.criado_em.isoformat()
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict):
+        usuario = User.from_dict(data.get("usuario", {}))
+        return cls(
+            _id=str(data.get("_id", "")),
+            usuario=usuario,
+            quadra_id=data.get("quadra_id", ""),
+            data_reserva=datetime.fromisoformat(data.get("data_reserva")),
+            quantidade_horas=data.get("quantidade_horas", 1),
+            status=data.get("status", "pendente"),
+            criado_em=datetime.fromisoformat(data.get("criado_em")) if data.get("criado_em") else datetime.now()
+        )
+
+class ReservationRepository:
+    def __init__(self):
+        self.collection_name = "reservas"
+
+    def get_collection(self):
+        return mongodb.get_collection(self.collection_name)
+
+    def create(self, reservation: Reservation) -> str:
+        try:
+            result = self.get_collection().insert_one(reservation.to_dict())
+            return str(result.inserted_id)
+        except Exception as e:
+            logger.error(f"Erro ao criar reserva: {e}")
+            raise
+
+    def get_by_user_phone(self, phone: str) -> List[dict]:
+        try:
+            items = []
+            for doc in self.get_collection().find({"usuario.telefone": phone}).sort("data_reserva", 1):
+                items.append(doc)
+            return items
+        except Exception as e:
+            logger.error(f"Erro ao buscar reservas do usuário: {e}")
+            raise
+
+    def cancel_by_id(self, reservation_id: str) -> bool:
+        try:
+            res = self.get_collection().update_one({"_id": ObjectId(reservation_id)}, {"$set": {"status": "cancelada"}})
+            return res.modified_count > 0
+        except Exception as e:
+            logger.error(f"Erro ao cancelar reserva: {e}")
+            raise
+
+class ConversationStateRepository:
+    def __init__(self):
+        self.collection_name = "estados_conversa"
+
+    def get_collection(self):
+        return mongodb.get_collection(self.collection_name)
+
+    def get_state(self, phone: str) -> Optional[dict]:
+        return self.get_collection().find_one({"phone": phone})
+
+    def set_state(self, phone: str, state: dict):
+        state["phone"] = phone
+        self.get_collection().update_one({"phone": phone}, {"$set": state}, upsert=True)
+
+    def clear_state(self, phone: str):
+        self.get_collection().delete_one({"phone": phone})
+
+reservation_repo = ReservationRepository()
+state_repo = ConversationStateRepository()
+
+# ===== NLU E HELPERS =====
+HOURS_PATTERN = re.compile(r"(\d{1,2})(?:h|:\d{2})?", re.IGNORECASE)
+DATE_PATTERN = re.compile(r"(hoje|amanh[aã]|\d{1,2}/\d{1,2}|\d{4}-\d{2}-\d{2})", re.IGNORECASE)
+HOURS_QTY_PATTERN = re.compile(r"(\d{1,2})\s*(h|horas?)", re.IGNORECASE)
+
+def parse_date(text: str) -> Optional[datetime]:
+    text = text.lower()
+    now = datetime.now()
+    if "hoje" in text:
+        return now
+    if "amanh" in text:
+        return now + timedelta(days=1)
+    m = DATE_PATTERN.search(text)
+    if m:
+        token = m.group(1)
+        try:
+            if "/" in token:
+                d, mth = token.split("/")
+                year = now.year
+                return datetime(year=int(year), month=int(mth), day=int(d))
+            if "-" in token:
+                return datetime.fromisoformat(token)
+        except Exception:
+            return None
+    return None
+
+def parse_time(text: str) -> Optional[int]:
+    match = HOURS_PATTERN.search(text)
+    if match:
+        hour = int(match.group(1))
+        if 0 <= hour <= 23:
+            return hour
+    return None
+
+def parse_hours_qty(text: str) -> int:
+    m = HOURS_QTY_PATTERN.search(text)
+    if m:
+        return max(1, min(6, int(m.group(1))))
+    return 1
+
+def find_court_by_hint(text: str) -> Optional[Court]:
+    hint = text.lower()
+    courts = court_repo.get_all()
+    for c in courts:
+        if c.nome.lower() in hint or c.tipo.lower() in hint:
+            return c
+    return courts[0] if courts else None
+
+def get_consecutive_slots(base: datetime, hours: int) -> List[str]:
+    slots = []
+    for i in range(hours):
+        slot_dt = base + timedelta(hours=i)
+        slots.append(slot_dt.isoformat())
+    return slots
+
+def check_availability(court: Court, base: datetime, hours: int) -> bool:
+    needed = set(get_consecutive_slots(base, hours))
+    available = set([h if isinstance(h, str) else (h.isoformat() if isinstance(h, datetime) else str(h)) for h in court.horarios_disponiveis])
+    return needed.issubset(available)
+
+def block_slots(court: Court, base: datetime, hours: int):
+    needed = set(get_consecutive_slots(base, hours))
+    court.horarios_disponiveis = [h for h in [hh if isinstance(hh, str) else (hh.isoformat() if isinstance(hh, datetime) else str(hh)) for hh in court.horarios_disponiveis] if h not in needed]
+    # persist change
+    mongodb.get_collection("quadras").update_one({"_id": ObjectId(court._id)}, {"$set": {"horarios_disponiveis": court.horarios_disponiveis}})
+
+def intent_from_text(text: str, pending_state: Optional[dict]) -> str:
+    t = text.lower()
+    if pending_state and pending_state.get("awaiting") == "confirmation":
+        if any(w in t for w in ["confirmo", "confirmar", "sim", "ok"]):
+            return "confirmar"
+        if any(w in t for w in ["cancelar", "cancela", "não", "nao"]):
+            return "cancelar"
+    if any(w in t for w in ["ajuda", "menu", "opcoes", "opções", "help"]):
+        return "ajuda"
+    if any(w in t for w in ["minhas reservas", "minhas", "consultar", "minhas reservas", "ver reservas"]):
+        return "consultar"
+    if any(w in t for w in ["cancelar reserva", "cancelar", "cancelamento"]):
+        return "cancelar"
+    if any(w in t for w in ["reservar", "reserva", "agendar", "quero reservar"]):
+        return "reservar"
+    return "desconhecido"
+
+def handle_help() -> str:
+    return (
+        "Posso ajudar com: reservar quadra, consultar reservas e cancelar.\n"
+        "Exemplos: 'reservar amanhã 19h por 2 horas society' ou 'consultar minhas reservas'."
+    )
+
+def handle_consulta(phone: str) -> str:
+    reservas = reservation_repo.get_by_user_phone(phone)
+    if not reservas:
+        return "Você não possui reservas."
+    lines = []
+    for r in reservas:
+        dt = datetime.fromisoformat(r.get("data_reserva"))
+        qid = r.get("quadra_id")
+        court_doc = mongodb.get_collection("quadras").find_one({"_id": ObjectId(qid)})
+        nome = court_doc.get("nome") if court_doc else "Quadra"
+        horas = r.get("quantidade_horas", 1)
+        lines.append(f"- {nome} em {dt.strftime('%d/%m %H:%M')} por {horas}h (status: {r.get('status')})")
+    return "Suas reservas:\n" + "\n".join(lines)
+
+def handle_reserva_flow(user: User, text: str, phone: str) -> str:
+    date = parse_date(text)
+    hour = parse_time(text)
+    hours_qty = parse_hours_qty(text)
+    court = find_court_by_hint(text)
+    if not court:
+        return "Não encontrei quadras cadastradas."
+    if date is None or hour is None:
+        return "Informe data e hora. Ex.: 'reservar amanhã 19h por 2 horas'."
+    start_dt = date.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if not check_availability(court, start_dt, hours_qty):
+        return "Não há disponibilidade para esse horário/intervalo. Tente outro horário."
+    total = court.valor_hora * hours_qty
+    # salva estado aguardando confirmação
+    state_repo.set_state(phone, {
+        "awaiting": "confirmation",
+        "court_id": court._id,
+        "court_nome": court.nome,
+        "start_iso": start_dt.isoformat(),
+        "hours_qty": hours_qty,
+        "preco_hora": court.valor_hora,
+        "total": total
+    })
+    return (f"{court.nome} disponível em {start_dt.strftime('%d/%m %H:%M')} por {hours_qty}h. "
+            f"Preço R${court.valor_hora:.2f}/h, total R${total:.2f}. Confirmar?")
+
+def handle_confirm(phone: str, user: User) -> str:
+    state = state_repo.get_state(phone)
+    if not state or state.get("awaiting") != "confirmation":
+        return "Não há reserva pendente para confirmar."
+    court_id = state["court_id"]
+    start_dt = datetime.fromisoformat(state["start_iso"])
+    hours_qty = int(state["hours_qty"])
+    # verifica e grava
+    court_doc = mongodb.get_collection("quadras").find_one({"_id": ObjectId(court_id)})
+    if not court_doc:
+        return "Quadra não encontrada."
+    court = Court.from_dict(court_doc)
+    if not check_availability(court, start_dt, hours_qty):
+        state_repo.clear_state(phone)
+        return "Infelizmente o horário ficou indisponível. Tente outro."
+    # bloquear slots e salvar reserva
+    block_slots(court, start_dt, hours_qty)
+    reserva = Reservation(usuario=user, quadra_id=court_id, data_reserva=start_dt, quantidade_horas=hours_qty, status="confirmada")
+    res_id = reservation_repo.create(reserva)
+    state_repo.clear_state(phone)
+    return (f"Reserva confirmada! Código {res_id}. {court.nome} em {start_dt.strftime('%d/%m %H:%M')} "
+            f"por {hours_qty}h. Precisando, é só chamar!")
+
+def handle_cancel(phone: str) -> str:
+    state_repo.clear_state(phone)
+    return "Ok, cancelado. Se quiser, posso buscar outro horário."
+
+def process_message(phone: str, text: str) -> str:
+    user = user_repo.find_or_create_by_phone(phone)
+    pending = state_repo.get_state(phone)
+    intent = intent_from_text(text, pending)
+    if intent == "ajuda":
+        return handle_help()
+    if intent == "consultar":
+        return handle_consulta(phone)
+    if intent == "reservar":
+        return handle_reserva_flow(user, text, phone)
+    if intent == "confirmar":
+        return handle_confirm(phone, user)
+    if intent == "cancelar":
+        # prioridade: cancelar fluxo pendente
+        if pending and pending.get("awaiting") == "confirmation":
+            return handle_cancel(phone)
+        return "Para cancelar, informe o código ou responda durante uma confirmação."
+    # fallback
+    return "Não entendi. Envie 'ajuda' para ver exemplos."
+
 # ===== ROTAS =====
 @app.route("/")
 def root():
@@ -274,20 +542,12 @@ def whatsapp_webhook():
             logger.warning("Mensagem sem dados necessários")
             return "OK"
         
-        # Busca ou cria usuário
-        try:
-            user = user_repo.find_or_create_by_phone(from_number)
-            logger.info(f"Usuário encontrado/criado: {user.nome}")
-        except Exception as e:
-            logger.error(f"Erro ao buscar/criar usuário: {e}")
-            user = User(nome="Usuário", telefone=from_number)
-        
-        # Resposta simples para teste
-        reply_text = f"Olá {user.nome}! Recebi sua mensagem: '{message_body}'. Sistema com MongoDB funcionando!"
-        
+        # Processa a mensagem com a lógica do agente
+        reply_text = process_message(from_number, message_body)
+        resp = MessagingResponse()
+        resp.message(reply_text)
         logger.info(f"Resposta enviada para {from_number}")
-        
-        return "OK"
+        return str(resp)
         
     except Exception as e:
         logger.error(f"Erro no webhook: {e}")

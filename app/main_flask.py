@@ -3,6 +3,7 @@ Aplicação Flask simples para o Agente de Reservas de Quadras
 Versão com MongoDB integrado
 """
 from flask import Flask, request, jsonify
+from twilio
 import logging
 import os
 from datetime import datetime
@@ -90,12 +91,13 @@ def whatsapp_webhook():
             logger.error(f"Erro ao buscar/criar usuário: {e}")
             user = User(nome="Usuário", telefone=from_number)
         
-        # Resposta simples para teste
+        # Gera resposta em TwiML para Twilio
+        from twilio.twiml.messaging_response import MessagingResponse
         reply_text = f"Olá {user.nome}! Recebi sua mensagem: '{message_body}'. Sistema com MongoDB funcionando!"
-        
+        resp = MessagingResponse()
+        resp.message(reply_text)
         logger.info(f"Resposta enviada para {from_number}")
-        
-        return "OK"
+        return str(resp)
         
     except Exception as e:
         logger.error(f"Erro no webhook: {e}")
