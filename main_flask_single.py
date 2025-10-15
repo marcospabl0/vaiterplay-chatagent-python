@@ -366,9 +366,10 @@ class ConversationMessage:
         )
 
 class ConversationHistoryRepository:
-    """Repositório para histórico de conversas (janela de 24h)"""
+    """Repositório para histórico de conversas com sessões"""
     def __init__(self):
         self.collection_name = "conversation_history"
+        self.session_timeout_minutes = 30  # Timeout de sessão
 
     def get_collection(self):
         return mongodb.get_collection(self.collection_name)
@@ -376,31 +377,55 @@ class ConversationHistoryRepository:
     def add_message(self, phone: str, message: ConversationMessage):
         """Adiciona mensagem ao histórico do usuário"""
         try:
-            # Busca ou cria documento do usuário
+            # Busca documento do usuário
             user_doc = self.get_collection().find_one({"phone": phone})
-            if not user_doc:
+            current_time = datetime.now()
+            
+            # Verifica se precisa iniciar nova sessão
+            if user_doc:
+                last_activity = datetime.fromisoformat(user_doc.get("last_activity", current_time.isoformat()))
+                time_diff = current_time - last_activity
+                
+                # Se passou mais de 30 minutos, inicia nova sessão
+                if time_diff.total_seconds() > (self.session_timeout_minutes * 60):
+                    logger.info(f"[NOVA-SESSAO] Usuário {phone}: Iniciando nova sessão após {time_diff.total_seconds()/60:.1f}min de inatividade")
+                    # Cria nova sessão (limpa mensagens antigas)
+                    user_doc = {
+                        "phone": phone,
+                        "messages": [],
+                        "last_activity": current_time.isoformat(),
+                        "session_start": current_time.isoformat()
+                    }
+                    self.get_collection().update_one(
+                        {"phone": phone},
+                        {"$set": user_doc},
+                        upsert=True
+                    )
+                else:
+                    # Continua sessão atual
+                    messages = user_doc.get("messages", [])
+                    messages.append(message.to_dict())
+                    
+                    self.get_collection().update_one(
+                        {"phone": phone},
+                        {
+                            "$set": {
+                                "messages": messages,
+                                "last_activity": current_time.isoformat()
+                            }
+                        }
+                    )
+            else:
+                # Primeira mensagem do usuário
+                logger.info(f"[PRIMEIRA-SESSAO] Usuário {phone}: Iniciando primeira sessão")
                 user_doc = {
                     "phone": phone,
-                    "messages": [],
-                    "last_activity": datetime.now().isoformat()
+                    "messages": [message.to_dict()],
+                    "last_activity": current_time.isoformat(),
+                    "session_start": current_time.isoformat()
                 }
                 self.get_collection().insert_one(user_doc)
-                user_doc = self.get_collection().find_one({"phone": phone})
-            
-            # Adiciona nova mensagem
-            messages = user_doc.get("messages", [])
-            messages.append(message.to_dict())
-            
-            # Atualiza documento
-            self.get_collection().update_one(
-                {"phone": phone},
-                {
-                    "$set": {
-                        "messages": messages,
-                        "last_activity": datetime.now().isoformat()
-                    }
-                }
-            )
+                
         except Exception as e:
             logger.error(f"Erro ao adicionar mensagem ao histórico: {e}")
 
@@ -532,6 +557,12 @@ def block_slots(court: Court, base: datetime, hours: int):
 
 def intent_from_text(text: str, pending_state: Optional[dict]) -> str:
     t = text.lower()
+    
+    # Detecção de despedida (fim de sessão)
+    farewell_words = ["tchau", "até logo", "até mais", "obrigado", "obrigada", "valeu", "bye", "até", "falou"]
+    if any(word in t for word in farewell_words):
+        return "despedida"
+    
     # Saudações diretas
     if t.strip() in ["oi", "olá", "ola", "bom dia", "boa tarde", "boa noite"]:
         return "saudacao"
@@ -623,6 +654,26 @@ def handle_cancel(phone: str) -> str:
     state_repo.clear_state(phone)
     return "Ok, cancelado. Se quiser, posso buscar outro horário."
 
+def handle_farewell(phone: str) -> str:
+    """Trata despedida do usuário - finaliza sessão"""
+    try:
+        # Limpa estado pendente
+        state_repo.clear_state(phone)
+        
+        # Marca fim da sessão no histórico
+        user_doc = history_repo.get_collection().find_one({"phone": phone})
+        if user_doc:
+            history_repo.get_collection().update_one(
+                {"phone": phone},
+                {"$set": {"session_end": datetime.now().isoformat()}}
+            )
+            logger.info(f"[FIM-SESSAO] Usuário {phone}: Sessão finalizada por despedida")
+        
+        return "Até logo! Foi um prazer ajudar. Quando precisar de reservas, é só chamar! 😊"
+    except Exception as e:
+        logger.error(f"Erro ao processar despedida: {e}")
+        return "Até logo! Foi um prazer ajudar!"
+
 def process_message(phone: str, text: str) -> str:
     # Salva mensagem do usuário no histórico
     user_message = ConversationMessage(role="user", content=text)
@@ -632,29 +683,22 @@ def process_message(phone: str, text: str) -> str:
     pending = state_repo.get_state(phone)
     intent = intent_from_text(text, pending)
     
-    # Processa com NLU tradicional primeiro
-    if intent == "saudacao":
-        response = (
-            "Olá! Eu sou seu assistente de reservas. Posso reservar quadra, consultar e cancelar. "
-            "Diga algo como: 'reservar amanhã 19h por 2 horas society'."
-        )
-    elif intent == "ajuda":
-        response = handle_help()
-    elif intent == "consultar":
-        response = handle_consulta(phone)
-    elif intent == "reservar":
-        response = handle_reserva_flow(user, text, phone)
-    elif intent == "confirmar":
+    # Processa apenas ações críticas com NLU tradicional
+    response_source = "NLU"
+    if intent == "confirmar":
         response = handle_confirm(phone, user)
-    elif intent == "cancelar":
-        # prioridade: cancelar fluxo pendente
-        if pending and pending.get("awaiting") == "confirmation":
-            response = handle_cancel(phone)
-        else:
-            response = "Para cancelar, informe o código ou responda durante uma confirmação."
+        logger.info(f"[NLU-CONFIRMAR] Usuário {phone}: '{text}' -> Resposta: '{response[:50]}...'")
+    elif intent == "cancelar" and pending and pending.get("awaiting") == "confirmation":
+        response = handle_cancel(phone)
+        logger.info(f"[NLU-CANCELAR] Usuário {phone}: '{text}' -> Resposta: '{response[:50]}...'")
+    elif intent == "despedida":
+        response = handle_farewell(phone)
+        logger.info(f"[NLU-DESPEDIDA] Usuário {phone}: '{text}' -> Resposta: '{response[:50]}...'")
     else:
-        # Fallback: usar LLM com contexto da conversa
+        # Tudo mais é processado pela IA com contexto completo
+        response_source = "LLM"
         response = generate_llm_response(phone, text)
+        logger.info(f"[LLM-CONVERSA] Usuário {phone}: '{text}' -> Resposta: '{response[:50]}...'")
     
     # Salva resposta do assistente no histórico
     assistant_message = ConversationMessage(role="assistant", content=response)
@@ -668,9 +712,11 @@ def process_message(phone: str, text: str) -> str:
 def generate_llm_response(phone: str, text: str) -> str:
     """Gera resposta usando LLM com contexto da conversa"""
     if not groq_client:
+        logger.warning(f"[LLM-DESABILITADO] Usuário {phone}: '{text}' -> Fallback para resposta padrão")
         return "Não entendi. Envie 'ajuda' para ver exemplos."
     
     try:
+        logger.info(f"[LLM-INICIANDO] Usuário {phone}: '{text}' -> Gerando resposta com contexto")
         # Contexto das quadras
         courts = court_repo.get_all()
         courts_context = "\n".join([f"- {c.nome} ({c.tipo}) - R${c.valor_hora:.2f}/h" for c in courts][:10]) or "(sem quadras cadastradas)"
@@ -685,10 +731,10 @@ def generate_llm_response(phone: str, text: str) -> str:
             state_context = f"\nEstado atual: Aguardando confirmação de reserva - {pending.get('court_nome')} em {pending.get('start_iso')} por {pending.get('hours_qty')}h - Total: R${pending.get('total', 0):.2f}"
         
         # Monta prompt com contexto completo
-        prompt = f"""Você é um assistente de reservas de quadras esportivas via WhatsApp. 
+        prompt = f"""Você é um assistente inteligente de reservas de quadras esportivas via WhatsApp. 
 Aja de forma natural, amigável e objetiva em português do Brasil.
 
-CONTEXTO DAS QUADRAS:
+CONTEXTO DAS QUADRAS DISPONÍVEIS:
 {courts_context}
 
 HISTÓRICO DA CONVERSA (últimas mensagens):
@@ -698,28 +744,82 @@ HISTÓRICO DA CONVERSA (últimas mensagens):
 
 MENSAGEM ATUAL DO USUÁRIO: {text}
 
-INSTRUÇÕES:
+FUNCIONALIDADES QUE VOCÊ PODE REALIZAR:
+1. SAUDAÇÕES: Apenas na primeira mensagem ou após longa pausa
+2. CONSULTAR DISPONIBILIDADE: Liste quadras e horários disponíveis
+3. RESERVAR QUADRAS: Processe solicitações de reserva (data, hora, quantidade de horas)
+4. CONSULTAR RESERVAS: Mostre reservas do usuário
+5. CANCELAR RESERVAS: Ajude a cancelar reservas existentes
+6. AJUDA: Explique como usar o sistema
+
+INSTRUÇÕES IMPORTANTES:
 - Use o histórico para entender o contexto da conversa
-- Se o usuário estiver perguntando sobre disponibilidade, liste as quadras e horários
-- Se quiser reservar, peça data, hora e quantidade de horas
-- Seja natural e mantenha o contexto da conversa
-- Se não entender, peça esclarecimento de forma amigável
-- Respostas devem ser curtas e diretas (máximo 200 caracteres)"""
+- NÃO cumprimente a cada mensagem - seja direto e objetivo
+- Para reservas, sempre confirme: quadra, data, hora e quantidade de horas
+- Calcule o preço total (valor_hora × quantidade_horas)
+- Seja natural e mantenha continuidade na conversa
+- Respostas devem ser curtas e diretas (máximo 200 caracteres)
+- Se precisar de mais informações, peça de forma amigável
+- Para reservas complexas, quebre em etapas simples
+- Evite repetir informações já dadas na conversa"""
 
         chat = groq_client.chat.completions.create(
             model=settings.GROQ_MODEL,
             messages=[
-                {"role": "system", "content": "Você é um assistente especializado em reservas de quadras esportivas."},
+                {"role": "system", "content": "Você é um assistente especializado em reservas de quadras esportivas. Seja direto e objetivo. Não repita saudações desnecessariamente."},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.7,
+            temperature=0.5,  # Reduzido para ser mais consistente
             max_tokens=200,
         )
         
-        return chat.choices[0].message.content.strip()
+        response = chat.choices[0].message.content.strip()
+        
+        # Verifica se a IA sugeriu uma ação específica que precisa ser executada
+        if "RESERVAR:" in response:
+            # Extrai dados da reserva sugerida pela IA
+            try:
+                # Parse da resposta da IA para extrair dados da reserva
+                lines = response.split('\n')
+                for line in lines:
+                    if "RESERVAR:" in line:
+                        # Formato: RESERVAR: quadra_id, data, hora, horas_qty
+                        parts = line.split("RESERVAR:")[1].strip().split(",")
+                        if len(parts) >= 4:
+                            court_id = parts[0].strip()
+                            date_str = parts[1].strip()
+                            hour = int(parts[2].strip())
+                            hours_qty = int(parts[3].strip())
+                            
+                            # Executa a reserva
+                            court_doc = mongodb.get_collection("quadras").find_one({"_id": ObjectId(court_id)})
+                            if court_doc:
+                                court = Court.from_dict(court_doc)
+                                date_obj = datetime.fromisoformat(date_str)
+                                start_dt = date_obj.replace(hour=hour, minute=0, second=0, microsecond=0)
+                                
+                                if check_availability(court, start_dt, hours_qty):
+                                    total = court.valor_hora * hours_qty
+                                    state_repo.set_state(phone, {
+                                        "awaiting": "confirmation",
+                                        "court_id": court_id,
+                                        "court_nome": court.nome,
+                                        "start_iso": start_dt.isoformat(),
+                                        "hours_qty": hours_qty,
+                                        "preco_hora": court.valor_hora,
+                                        "total": total
+                                    })
+                                    response = f"{court.nome} disponível em {start_dt.strftime('%d/%m %H:%M')} por {hours_qty}h. Preço R${court.valor_hora:.2f}/h, total R${total:.2f}. Confirmar?"
+                                else:
+                                    response = "Infelizmente esse horário não está mais disponível. Tente outro horário."
+            except Exception as e:
+                logger.error(f"Erro ao processar ação da IA: {e}")
+        
+        logger.info(f"[LLM-SUCESSO] Usuário {phone}: '{text}' -> Resposta gerada: '{response[:100]}...'")
+        return response
         
     except Exception as e:
-        logger.error(f"LLM fallback falhou: {e}")
+        logger.error(f"[LLM-ERRO] Usuário {phone}: '{text}' -> Erro: {e}")
         return "Não entendi. Envie 'ajuda' para ver exemplos."
 
 # ===== ROTAS =====
