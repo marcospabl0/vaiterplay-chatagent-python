@@ -92,26 +92,28 @@ class User:
             criado_em=data.get("criado_em")
         )
 
-class Court:
-    """Modelo para Quadra"""
+class Establishment:
+    """Modelo para Estabelecimento"""
     
-    def __init__(self, nome: str, tipo: str, endereco: dict, valor_hora: float, 
-                 horarios_disponiveis: Optional[List[datetime]] = None, _id: Optional[str] = None):
+    def __init__(self, nome: str, endereco: dict, telefone: str, email: str = "", 
+                 ativo: bool = True, criado_em: Optional[datetime] = None, _id: Optional[str] = None):
         self._id = _id
         self.nome = nome
-        self.tipo = tipo
         self.endereco = endereco
-        self.valor_hora = valor_hora
-        self.horarios_disponiveis = horarios_disponiveis or []
+        self.telefone = telefone
+        self.email = email
+        self.ativo = ativo
+        self.criado_em = criado_em or datetime.now()
     
     def to_dict(self):
         """Converte para dicionário (omitindo _id quando None)"""
         data = {
             "nome": self.nome,
-            "tipo": self.tipo,
             "endereco": self.endereco,
-            "valor_hora": self.valor_hora,
-            "horarios_disponiveis": [h.isoformat() if isinstance(h, datetime) else h for h in self.horarios_disponiveis]
+            "telefone": self.telefone,
+            "email": self.email,
+            "ativo": self.ativo,
+            "criado_em": self.criado_em.isoformat()
         }
         if self._id:
             data["_id"] = self._id
@@ -123,10 +125,54 @@ class Court:
         return cls(
             _id=str(data.get("_id", "")),
             nome=data.get("nome", ""),
-            tipo=data.get("tipo", ""),
             endereco=data.get("endereco", {}),
+            telefone=data.get("telefone", ""),
+            email=data.get("email", ""),
+            ativo=data.get("ativo", True),
+            criado_em=datetime.fromisoformat(data.get("criado_em")) if data.get("criado_em") else datetime.now()
+        )
+
+class Court:
+    """Modelo para Quadra (Beach Tennis)"""
+    
+    def __init__(self, nome: str, establishment_id: str, valor_hora: float, 
+                 horarios_funcionamento: Optional[List[int]] = None,
+                 ativo: bool = True, criado_em: Optional[datetime] = None, _id: Optional[str] = None):
+        self._id = _id
+        self.nome = nome
+        self.tipo = "Beach Tennis"  # Fixo
+        self.establishment_id = establishment_id
+        self.valor_hora = valor_hora
+        self.horarios_funcionamento = horarios_funcionamento or list(range(6, 24))  # 06h às 23h
+        self.ativo = ativo
+        self.criado_em = criado_em or datetime.now()
+    
+    def to_dict(self):
+        """Converte para dicionário (omitindo _id quando None)"""
+        data = {
+            "nome": self.nome,
+            "tipo": self.tipo,
+            "establishment_id": self.establishment_id,
+            "valor_hora": self.valor_hora,
+            "horarios_funcionamento": self.horarios_funcionamento,
+            "ativo": self.ativo,
+            "criado_em": self.criado_em.isoformat()
+        }
+        if self._id:
+            data["_id"] = self._id
+        return data
+    
+    @classmethod
+    def from_dict(cls, data: dict):
+        """Cria instância a partir de dicionário"""
+        return cls(
+            _id=str(data.get("_id", "")),
+            nome=data.get("nome", ""),
+            establishment_id=data.get("establishment_id", ""),
             valor_hora=data.get("valor_hora", 0.0),
-            horarios_disponiveis=data.get("horarios_disponiveis", [])
+            horarios_funcionamento=data.get("horarios_funcionamento", list(range(6, 24))),
+            ativo=data.get("ativo", True),
+            criado_em=datetime.fromisoformat(data.get("criado_em")) if data.get("criado_em") else datetime.now()
         )
 
 # ===== CONEXÃO MONGODB =====
@@ -216,11 +262,56 @@ class UserRepository:
             logger.error(f"Erro ao buscar/criar usuário: {e}")
             raise
 
+class EstablishmentRepository:
+    """Repositório para operações de estabelecimentos"""
+    
+    def __init__(self):
+        self.collection_name = "establishments"
+    
+    def get_collection(self):
+        """Retorna a coleção de estabelecimentos"""
+        return mongodb.get_collection(self.collection_name)
+    
+    def create(self, establishment: Establishment) -> str:
+        """Cria um novo estabelecimento"""
+        try:
+            collection = self.get_collection()
+            result = collection.insert_one(establishment.to_dict())
+            logger.info(f"Estabelecimento criado com ID: {result.inserted_id}")
+            return str(result.inserted_id)
+        except Exception as e:
+            logger.error(f"Erro ao criar estabelecimento: {e}")
+            raise
+    
+    def get_all(self) -> List[Establishment]:
+        """Busca todos os estabelecimentos ativos"""
+        try:
+            collection = self.get_collection()
+            establishments = []
+            for establishment_data in collection.find({"ativo": True}):
+                establishments.append(Establishment.from_dict(establishment_data))
+            return establishments
+        except Exception as e:
+            logger.error(f"Erro ao buscar estabelecimentos: {e}")
+            raise
+    
+    def get_by_id(self, establishment_id: str) -> Optional[Establishment]:
+        """Busca estabelecimento por ID"""
+        try:
+            collection = self.get_collection()
+            establishment_data = collection.find_one({"_id": ObjectId(establishment_id), "ativo": True})
+            if establishment_data:
+                return Establishment.from_dict(establishment_data)
+            return None
+        except Exception as e:
+            logger.error(f"Erro ao buscar estabelecimento por ID: {e}")
+            raise
+
 class CourtRepository:
     """Repositório para operações de quadras"""
     
     def __init__(self):
-        self.collection_name = "quadras"
+        self.collection_name = "courts"
     
     def get_collection(self):
         """Retorna a coleção de quadras"""
@@ -238,30 +329,56 @@ class CourtRepository:
             raise
     
     def get_all(self) -> List[Court]:
-        """Busca todas as quadras"""
+        """Busca todas as quadras ativas"""
         try:
             collection = self.get_collection()
             courts = []
-            for court_data in collection.find():
+            for court_data in collection.find({"ativo": True}):
                 courts.append(Court.from_dict(court_data))
             return courts
         except Exception as e:
             logger.error(f"Erro ao buscar quadras: {e}")
             raise
+    
+    def get_by_establishment(self, establishment_id: str) -> List[Court]:
+        """Busca quadras por estabelecimento"""
+        try:
+            collection = self.get_collection()
+            courts = []
+            for court_data in collection.find({"establishment_id": establishment_id, "ativo": True}):
+                courts.append(Court.from_dict(court_data))
+            return courts
+        except Exception as e:
+            logger.error(f"Erro ao buscar quadras por estabelecimento: {e}")
+            raise
+    
+    def get_by_id(self, court_id: str) -> Optional[Court]:
+        """Busca quadra por ID"""
+        try:
+            collection = self.get_collection()
+            court_data = collection.find_one({"_id": ObjectId(court_id), "ativo": True})
+            if court_data:
+                return Court.from_dict(court_data)
+            return None
+        except Exception as e:
+            logger.error(f"Erro ao buscar quadra por ID: {e}")
+            raise
 
 # Instâncias globais
 user_repo = UserRepository()
+establishment_repo = EstablishmentRepository()
 court_repo = CourtRepository()
 
 class Reservation:
     """Modelo para Reserva"""
 
-    def __init__(self, usuario: User, quadra_id: str, data_reserva: datetime,
+    def __init__(self, usuario: User, establishment_id: str, court_id: str, data_reserva: datetime,
                  quantidade_horas: int = 1, status: str = "pendente",
                  criado_em: Optional[datetime] = None, _id: Optional[str] = None):
         self._id = _id
         self.usuario = usuario
-        self.quadra_id = quadra_id
+        self.establishment_id = establishment_id
+        self.court_id = court_id
         self.data_reserva = data_reserva
         self.quantidade_horas = quantidade_horas
         self.status = status
@@ -270,7 +387,8 @@ class Reservation:
     def to_dict(self):
         data = {
             "usuario": self.usuario.to_dict(),
-            "quadra_id": self.quadra_id,
+            "establishment_id": self.establishment_id,
+            "court_id": self.court_id,
             "data_reserva": self.data_reserva.isoformat(),
             "quantidade_horas": self.quantidade_horas,
             "status": self.status,
@@ -286,7 +404,8 @@ class Reservation:
         return cls(
             _id=str(data.get("_id", "")),
             usuario=usuario,
-            quadra_id=data.get("quadra_id", ""),
+            establishment_id=data.get("establishment_id", ""),
+            court_id=data.get("court_id", ""),
             data_reserva=datetime.fromisoformat(data.get("data_reserva")),
             quantidade_horas=data.get("quantidade_horas", 1),
             status=data.get("status", "pendente"),
@@ -312,6 +431,9 @@ class ReservationRepository:
         try:
             items = []
             for doc in self.get_collection().find({"usuario.telefone": phone}).sort("data_reserva", 1):
+                # Adiciona campos calculados para compatibilidade
+                doc["quantidade_horas"] = doc.get("quantidade_horas", 1)
+                doc["valor_total"] = doc.get("valor_total", 0.0)
                 items.append(doc)
             return items
         except Exception as e:
@@ -320,7 +442,12 @@ class ReservationRepository:
 
     def cancel_by_id(self, reservation_id: str) -> bool:
         try:
+            # Atualiza status para cancelada
             res = self.get_collection().update_one({"_id": ObjectId(reservation_id)}, {"$set": {"status": "cancelada"}})
+            
+            if res.modified_count > 0:
+                logger.info(f"Reserva {reservation_id} cancelada com sucesso")
+            
             return res.modified_count > 0
         except Exception as e:
             logger.error(f"Erro ao cancelar reserva: {e}")
@@ -342,6 +469,103 @@ class ConversationStateRepository:
 
     def clear_state(self, phone: str):
         self.get_collection().delete_one({"phone": phone})
+
+# ===== FUNÇÕES DE VALIDAÇÃO DE DISPONIBILIDADE =====
+
+def validate_court_availability(court_id: str, data_reserva: datetime, quantidade_horas: int) -> dict:
+    """
+    Valida se uma quadra está disponível para reserva em uma data/hora específica
+    
+    Args:
+        court_id: ID da quadra
+        data_reserva: Data e hora da reserva
+        quantidade_horas: Quantidade de horas para reservar
+    
+    Returns:
+        dict: {
+            "disponivel": bool,
+            "horarios_necessarios": List[int],
+            "horarios_disponiveis": List[int],
+            "mensagem": str
+        }
+    """
+    try:
+        # Busca a quadra
+        court = court_repo.get_by_id(court_id)
+        if not court:
+            return {
+                "disponivel": False,
+                "horarios_necessarios": [],
+                "horarios_disponiveis": [],
+                "mensagem": "Quadra não encontrada."
+            }
+        
+        # Horários de funcionamento da quadra
+        horarios_funcionamento = court.horarios_funcionamento
+        
+        # Calcula horários necessários para a reserva
+        hora_inicio = data_reserva.hour
+        horarios_necessarios = list(range(hora_inicio, hora_inicio + quantidade_horas))
+        
+        # Verifica se os horários estão dentro do funcionamento
+        horarios_fora_funcionamento = [h for h in horarios_necessarios if h not in horarios_funcionamento]
+        if horarios_fora_funcionamento:
+            return {
+                "disponivel": False,
+                "horarios_necessarios": horarios_necessarios,
+                "horarios_disponiveis": horarios_funcionamento,
+                "mensagem": f"Horários {horarios_fora_funcionamento} estão fora do horário de funcionamento."
+            }
+        
+        # Busca reservas confirmadas na data
+        data_inicio = data_reserva.replace(hour=0, minute=0, second=0, microsecond=0)
+        data_fim = data_inicio.replace(hour=23, minute=59, second=59)
+        
+        reservations_collection = mongodb.get_collection("reservations")
+        reservas_confirmadas = list(reservations_collection.find({
+            "court_id": court_id,
+            "data_reserva": {
+                "$gte": data_inicio.isoformat(),
+                "$lte": data_fim.isoformat()
+            },
+            "status": "confirmada"
+        }))
+        
+        # Calcula horários ocupados
+        horarios_ocupados = set()
+        for reserva in reservas_confirmadas:
+            reserva_dt = datetime.fromisoformat(reserva["data_reserva"])
+            reserva_hora_inicio = reserva_dt.hour
+            reserva_horas = reserva.get("quantidade_horas", 1)
+            reserva_horarios = list(range(reserva_hora_inicio, reserva_hora_inicio + reserva_horas))
+            horarios_ocupados.update(reserva_horarios)
+        
+        # Verifica se algum horário necessário está ocupado
+        horarios_conflito = [h for h in horarios_necessarios if h in horarios_ocupados]
+        if horarios_conflito:
+            return {
+                "disponivel": False,
+                "horarios_necessarios": horarios_necessarios,
+                "horarios_disponiveis": [h for h in horarios_funcionamento if h not in horarios_ocupados],
+                "horarios_ocupados": horarios_conflito,
+                "mensagem": f"Horários {horarios_conflito} já estão ocupados."
+            }
+        
+        return {
+            "disponivel": True,
+            "horarios_necessarios": horarios_necessarios,
+            "horarios_disponiveis": [h for h in horarios_funcionamento if h not in horarios_ocupados],
+            "mensagem": "Quadra disponível para reserva."
+        }
+        
+    except Exception as e:
+        logger.error(f"Erro ao validar disponibilidade: {e}")
+        return {
+            "disponivel": False,
+            "horarios_necessarios": [],
+            "horarios_disponiveis": [],
+            "mensagem": f"Erro ao verificar disponibilidade: {str(e)}"
+        }
 
 class ConversationMessage:
     """Modelo para mensagem individual da conversa"""
@@ -555,6 +779,27 @@ def block_slots(court: Court, base: datetime, hours: int):
     # persist change
     mongodb.get_collection("quadras").update_one({"_id": ObjectId(court._id)}, {"$set": {"horarios_disponiveis": court.horarios_disponiveis}})
 
+def extract_establishment_from_text(text: str) -> Optional[str]:
+    """Extrai nome do estabelecimento mencionado no texto"""
+    establishments = establishment_repo.get_all()
+    
+    text_lower = text.lower()
+    
+    for establishment in establishments:
+        establishment_name_lower = establishment.nome.lower()
+        
+        # Verifica se o nome completo está no texto
+        if establishment_name_lower in text_lower:
+            return establishment._id
+        
+        # Verifica palavras-chave do nome
+        name_words = establishment_name_lower.split()
+        for word in name_words:
+            if len(word) > 3 and word in text_lower:
+                return establishment._id
+    
+    return None
+
 def intent_from_text(text: str, pending_state: Optional[dict]) -> str:
     t = text.lower()
     
@@ -631,22 +876,41 @@ def handle_confirm(phone: str, user: User) -> str:
     state = state_repo.get_state(phone)
     if not state or state.get("awaiting") != "confirmation":
         return "Não há reserva pendente para confirmar."
+    
     court_id = state["court_id"]
+    establishment_id = state.get("establishment_id", "")
     start_dt = datetime.fromisoformat(state["start_iso"])
     hours_qty = int(state["hours_qty"])
-    # verifica e grava
-    court_doc = mongodb.get_collection("quadras").find_one({"_id": ObjectId(court_id)})
-    if not court_doc:
-        return "Quadra não encontrada."
-    court = Court.from_dict(court_doc)
-    if not check_availability(court, start_dt, hours_qty):
+    
+    # Busca a quadra usando o novo repositório
+    court = court_repo.get_by_id(court_id)
+    if not court:
         state_repo.clear_state(phone)
-        return "Infelizmente o horário ficou indisponível. Tente outro."
-    # bloquear slots e salvar reserva
-    block_slots(court, start_dt, hours_qty)
-    reserva = Reservation(usuario=user, quadra_id=court_id, data_reserva=start_dt, quantidade_horas=hours_qty, status="confirmada")
+        return "Quadra não encontrada."
+    
+    # Valida disponibilidade real usando a nova função
+    availability_check = validate_court_availability(court_id, start_dt, hours_qty)
+    
+    if not availability_check["disponivel"]:
+        state_repo.clear_state(phone)
+        return f"Infelizmente o horário ficou indisponível. {availability_check['mensagem']}"
+    
+    # Bloqueia os horários e cria a reserva
+    horarios_necessarios = availability_check["horarios_necessarios"]
+    
+    # Cria a reserva com nova estrutura
+    reserva = Reservation(
+        usuario=user, 
+        establishment_id=establishment_id,
+        court_id=court_id, 
+        data_reserva=start_dt, 
+        quantidade_horas=hours_qty, 
+        status="confirmada"
+    )
+    
     res_id = reservation_repo.create(reserva)
     state_repo.clear_state(phone)
+    
     return (f"Reserva confirmada! Código {res_id}. {court.nome} em {start_dt.strftime('%d/%m %H:%M')} "
             f"por {hours_qty}h. Precisando, é só chamar!")
 
@@ -717,9 +981,21 @@ def generate_llm_response(phone: str, text: str) -> str:
     
     try:
         logger.info(f"[LLM-INICIANDO] Usuário {phone}: '{text}' -> Gerando resposta com contexto")
-        # Contexto das quadras
+        # Contexto das quadras e estabelecimentos
+        establishments = establishment_repo.get_all()
         courts = court_repo.get_all()
-        courts_context = "\n".join([f"- {c.nome} ({c.tipo}) - R${c.valor_hora:.2f}/h" for c in courts][:10]) or "(sem quadras cadastradas)"
+        
+        establishments_context = ""
+        if establishments:
+            establishments_context = "ESTABELECIMENTOS DISPONÍVEIS:\n" + "\n".join([f"- {e.nome} ({e.endereco.get('cidade', 'Cidade não informada')})" for e in establishments])
+        
+        courts_context = ""
+        if courts:
+            courts_context = "QUADRAS DISPONÍVEIS:\n" + "\n".join([f"- {c.nome} (Beach Tennis) - R${c.valor_hora:.2f}/h" for c in courts][:10])
+        
+        if not establishments_context and not courts_context:
+            establishments_context = "(sem estabelecimentos cadastrados)"
+            courts_context = "(sem quadras cadastradas)"
         
         # Contexto da conversa (últimas 10 mensagens)
         conversation_context = history_repo.get_conversation_context(phone, max_messages=10)
@@ -731,10 +1007,11 @@ def generate_llm_response(phone: str, text: str) -> str:
             state_context = f"\nEstado atual: Aguardando confirmação de reserva - {pending.get('court_nome')} em {pending.get('start_iso')} por {pending.get('hours_qty')}h - Total: R${pending.get('total', 0):.2f}"
         
         # Monta prompt com contexto completo
-        prompt = f"""Você é um assistente inteligente de reservas de quadras esportivas via WhatsApp. 
+        prompt = f"""Você é um assistente inteligente de reservas de quadras de Beach Tennis via WhatsApp. 
 Aja de forma natural, amigável e objetiva em português do Brasil.
 
-CONTEXTO DAS QUADRAS DISPONÍVEIS:
+{establishments_context}
+
 {courts_context}
 
 HISTÓRICO DA CONVERSA (últimas mensagens):
@@ -746,8 +1023,8 @@ MENSAGEM ATUAL DO USUÁRIO: {text}
 
 FUNCIONALIDADES QUE VOCÊ PODE REALIZAR:
 1. SAUDAÇÕES: Apenas na primeira mensagem ou após longa pausa
-2. CONSULTAR DISPONIBILIDADE: Liste quadras e horários disponíveis
-3. RESERVAR QUADRAS: Processe solicitações de reserva (data, hora, quantidade de horas)
+2. CONSULTAR DISPONIBILIDADE: Liste estabelecimentos e quadras disponíveis
+3. RESERVAR QUADRAS: Processe solicitações de reserva (estabelecimento, data, hora, quantidade de horas)
 4. CONSULTAR RESERVAS: Mostre reservas do usuário
 5. CANCELAR RESERVAS: Ajude a cancelar reservas existentes
 6. AJUDA: Explique como usar o sistema
@@ -755,8 +1032,9 @@ FUNCIONALIDADES QUE VOCÊ PODE REALIZAR:
 INSTRUÇÕES IMPORTANTES:
 - Use o histórico para entender o contexto da conversa
 - NÃO cumprimente a cada mensagem - seja direto e objetivo
-- Para reservas, sempre confirme: quadra, data, hora e quantidade de horas
+- Para reservas, sempre confirme: estabelecimento, quadra, data, hora e quantidade de horas
 - Calcule o preço total (valor_hora × quantidade_horas)
+- Horários disponíveis: 06h às 23h (uma hora por vez)
 - Seja natural e mantenha continuidade na conversa
 - Respostas devem ser curtas e diretas (máximo 200 caracteres)
 - Se precisar de mais informações, peça de forma amigável

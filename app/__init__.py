@@ -1,1 +1,0 @@
-# Módulo app para Flask
